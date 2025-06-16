@@ -20,11 +20,14 @@ def convert_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, i
             yield field_number, 1, field.attrib['tag'], '', field.text
         elif field.tag == '{http://www.loc.gov/MARC21/slim}datafield':
             tag = field.attrib['tag']
+            sf = 1
             if field.attrib['ind1'] != ' ':
-                yield field_number, 1, tag, 'i_1', field.attrib['ind1']
+                yield field_number, sf, tag, 'i_1', field.attrib['ind1']
+                sf += 1
             if field.attrib['ind2'] != ' ':
-                yield field_number, 1, tag, 'i_2', field.attrib['ind2']
-            for subfield_number, subfield in enumerate(field, start=1):
+                yield field_number, sf, tag, 'i_2', field.attrib['ind2']
+                sf += 1
+            for subfield_number, subfield in enumerate(field, start=sf):
                 yield field_number, subfield_number, tag, subfield.attrib['code'], subfield.text
         else:
             raise Exception('Unknown field ' + field.tag)
