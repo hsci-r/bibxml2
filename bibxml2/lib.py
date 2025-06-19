@@ -13,6 +13,9 @@ from fsspec.core import OpenFile, compr, infer_compression
 import _csv
 from tqdm.auto import tqdm
 
+#batch_size = 1024*1024  # 1 MiB
+batch_size = 64*1024*1024  # 64 MiB
+
 schema: pa.Schema = pa.schema([ # R compatibility schema
             pa.field('record_number', pa.int32()),
             pa.field('field_number', pa.int32()),
@@ -56,8 +59,8 @@ def convert(tag: str, convert_record: Callable[[lxml.etree._ElementIterator], It
                         for row in convert_record(elem):
                             if writing_parquet:
                                 batch.append((n, *row))
-                                if len(batch) == 1024*1024:
-                                    cast(pq.ParquetWriter, ow).write_batch(pa.record_batch(list(zip(*batch)), schema=schema))
+                                if len(batch) == batch_size:
+                                    cast(pq.ParquetWriter, ow).write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=batch_size)
                                     batch = []
                             else:
                                 cast(_csv.Writer, ow).writerow((n, *row))
@@ -70,4 +73,4 @@ def convert(tag: str, convert_record: Callable[[lxml.etree._ElementIterator], It
                     del context
             processed_files_tsize += input_file.fs.size(input_file.path)
         if writing_parquet and batch:
-            cast(pq.ParquetWriter, ow).write_batch(pa.record_batch(list(zip(*batch)), schema=schema))
+            cast(pq.ParquetWriter, ow).write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=batch_size)

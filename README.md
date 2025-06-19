@@ -7,7 +7,7 @@ The resulting CSV/TSV/parquet has been designed to be easy to use as a data tabl
 
 Here, `record_number` identifies the MARC/PICA+ record, while `field_number` and `subfield_number` can be used for more exact filtering / reconstructing the original field structure/order if needed.
 
-For MARC data fields, `ind1` and `ind2` values are reported as separate rows with the `subfield_code` being `i_1` or `i_2`, but only when non-empty.
+For MARC data fields, `ind1` and `ind2` values are reported as separate rows with the `subfield_code` being `Y` or `Z`, but only when non-empty (MARC requires subfield codes to be lowercase, so this should be relatively safe). The MARC leader is output with field code `LDR`.
 
 ## Installation
 
