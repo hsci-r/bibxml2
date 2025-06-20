@@ -4,7 +4,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import csv
 from functools import reduce
-from typing import Callable, Iterator, cast
+from typing import Callable, Iterator, cast, Sequence
 
 import click as click
 import lxml.etree
@@ -25,7 +25,7 @@ schema: pa.Schema = pa.schema([ # R compatibility schema
             pa.field('value', pa.string()) 
 ])
 
-def convert(tag: str, convert_record: Callable[[lxml.etree._ElementIterator], Iterator[tuple[int, int, str, str, str]]], input: list[str], output: str) -> None:
+def convert(tags: Sequence[str], convert_record: Callable[[lxml.etree._ElementIterator], Iterator[tuple[int, int, str, str, str]]], input: list[str], output: str) -> None:
     writing_parquet = output.endswith('.parquet')
     with cast(OpenFile, fsspec.open(output, 'wt' if not writing_parquet else 'wb', compression="infer")) as of, pq.ParquetWriter(of, 
             schema=schema, 
@@ -54,7 +54,7 @@ def convert(tag: str, convert_record: Callable[[lxml.etree._ElementIterator], It
                         inf = compr[compression](oinf, mode='rb') # type: ignore
                     else:
                         inf = oinf
-                    context = lxml.etree.iterparse(inf, events=('end',), tag=tag)
+                    context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
                     for _, elem in context:
                         for row in convert_record(elem):
                             if writing_parquet:

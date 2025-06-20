@@ -25,7 +25,7 @@ def convert_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, i
 def convert_picaxml(input: list[str], output: str):
     """Convert from PICAXML (compressed) INPUT files (actually glob patterns) into (compressed) CSV/TSV/parquet"""
     convert(
-        '{info:srw/schema/5/picaXML-v1.0}record',
+        ('{info:srw/schema/5/picaXML-v1.0}record', 'record'),
         convert_record,
         input,
         output

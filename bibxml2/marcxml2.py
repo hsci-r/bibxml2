@@ -14,11 +14,11 @@ from .lib import convert
 
 def convert_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, int, str, str, str]]:
     for field_number, field in enumerate(record, start = 1):
-        if field.tag == '{http://www.loc.gov/MARC21/slim}leader':
+        if field.tag == '{http://www.loc.gov/MARC21/slim}leader' or field.tag == 'leader':
             yield field_number, 1, 'LDR', '', field.text
-        elif field.tag == '{http://www.loc.gov/MARC21/slim}controlfield':
+        elif field.tag == '{http://www.loc.gov/MARC21/slim}controlfield' or field.tag == 'controlfield':
             yield field_number, 1, field.attrib['tag'], '', field.text
-        elif field.tag == '{http://www.loc.gov/MARC21/slim}datafield':
+        elif field.tag == '{http://www.loc.gov/MARC21/slim}datafield' or field.tag == 'datafield':
             tag = field.attrib['tag']
             sf = 1
             if field.attrib['ind1'] != ' ':
@@ -38,7 +38,7 @@ def convert_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, i
 def convert_marcxml(input: list[str], output: str):
     """Convert from MARCXML (compressed) INPUT files (actually glob patterns) into (compressed) CSV/TSV/parquet"""
     convert(
-        '{http://www.loc.gov/MARC21/slim}record',
+        ('{http://www.loc.gov/MARC21/slim}record', 'record'),
         convert_record,
         input,
         output
