@@ -7,7 +7,7 @@ Created on Mon Feb 15 18:59:15 2021
 """
 
 from typing import Iterator
-
+from unicodedata import normalize
 import click as click
 import lxml.etree
 from .lib import convert
@@ -22,13 +22,13 @@ def convert_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, i
             tag = field.attrib['tag']
             sf = 1
             if field.attrib['ind1'] != ' ':
-                yield field_number, sf, tag, 'Y', field.attrib['ind1']
+                yield field_number, sf, tag, 'Y', normalize(field.attrib['ind1'], 'NFC')
                 sf += 1
             if field.attrib['ind2'] != ' ':
-                yield field_number, sf, tag, 'Z', field.attrib['ind2']
+                yield field_number, sf, tag, 'Z', normalize(field.attrib['ind2'], 'NFC')
                 sf += 1
             for subfield_number, subfield in enumerate(field, start=sf):
-                yield field_number, subfield_number, tag, subfield.attrib['code'], subfield.text
+                yield field_number, subfield_number, tag, subfield.attrib['code'], normalize(subfield.text, 'NFC')
         else:
             print(f'Unknown field {field.tag} in record.')
 

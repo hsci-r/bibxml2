@@ -6,6 +6,7 @@ Created on Mon Feb 15 18:59:15 2021
 @author: jiemakel
 """
 
+from unicodedata import normalize
 from typing import Iterator
 
 import click as click
@@ -17,7 +18,7 @@ def convert_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, i
     for field_number, field in enumerate(record, start=1):
         tag = field.attrib['tag']
         for subfield_number, subfield in enumerate(field, start=1):
-            yield field_number, subfield_number, tag, subfield.attrib['code'], subfield.text
+            yield field_number, subfield_number, tag, subfield.attrib['code'], normalize(subfield.text, 'NFC')
 
 @click.command
 @click.option("-o", "--output", help="Output CSV/TSV (gz) / parquet file", required=True)
