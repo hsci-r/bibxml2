@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "bibxml2"
-version = "1.2.0"
+version = "1.4.0"
 description = "A simple converter of MARCXML/PICAXML to CSV/TSV/parquet"
 authors = ["Eetu Mäkelä <eetu.makela@helsinki.fi>"]
 readme = "README.md"
@@ -30,8 +30,7 @@ pre-commit = "^2.21.0"
 pylint = "^2.17.7"
 
 [tool.poetry.scripts]
-picaxml2 = "bibxml2.picaxml2:convert_picaxml"
-marcxml2 = "bibxml2.marcxml2:convert_marcxml"
+bibxml2 = "bibxml2.bibxml2:convert"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
