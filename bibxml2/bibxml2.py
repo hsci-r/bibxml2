@@ -22,6 +22,18 @@ schema: pa.Schema = pa.schema([ # R compatibility schema
             pa.field('value', pa.string()) 
 ])
 
+def parquet_writer(output: str, parquet_compression: str, parquet_compression_level: int) -> pq.ParquetWriter:
+    return pq.ParquetWriter(output, 
+            schema=schema, 
+            compression=parquet_compression, 
+            compression_level=parquet_compression_level,
+#            use_byte_stream_split=['record_number', 'field_number', 'subfield_number'], # type: ignore pyarrow import complains: BYTE_STREAM_SPLIT encoding is only supported for FLOAT or DOUBLE data
+            write_page_index=True, 
+            use_dictionary=['field_code', 'subfield_code'], # type: ignore
+            store_decimal_as_integer=True,
+            sorting_columns=[pq.SortingColumn(0), pq.SortingColumn(1), pq.SortingColumn(2)],
+        ) 
+
 def convert_marc_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, int, str, str, str]]:
     for field_number, field in enumerate(record, start = 1):
         if field.tag.endswith('leader'):
@@ -37,8 +49,9 @@ def convert_marc_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[i
             if field.attrib['ind2'] != ' ':
                 yield field_number, sf, tag, 'Z', normalize('NFC', field.attrib['ind2'])
                 sf += 1
-            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
-                yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
+#            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
+           for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
+                 yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
         else:
             print(f'Unknown field {field.tag} in record.')
 
@@ -54,8 +67,9 @@ def convert_pica_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[i
 @click.option("-c", "--parquet-compression", help="Parquet compression codec", default='zstd')
 @click.option("-l", "--parquet-compression-level", help="Parquet compression level", type=int, default=22)
 @click.option("-b", "--parquet-batch-size", help="Parquet batch size in bytes", type=int, default=1024*1024*64)
+@click.option("-mr", "--max-rows", help="Maximum number of rows per parquet file", type=int, default=1_000_000_000)
 @click.argument('input', nargs=-1)
-def convert(input: list[str], format: Literal['marc','pica'], output: str, parquet_compression: str, parquet_compression_level: int, parquet_batch_size: int) -> None:
+def convert(input: list[str], format: Literal['marc','pica'], output: str, parquet_compression: str, parquet_compression_level: int, parquet_batch_size: int, max_rows: int) -> None:
     if format == 'marc':
         tags = ('{http://www.loc.gov/MARC21/slim}record', 'record', '{info:lc/xmlns/marcxchange-v1}record')
         convert_record = convert_marc_record
@@ -63,53 +77,60 @@ def convert(input: list[str], format: Literal['marc','pica'], output: str, parqu
         tags = ('{info:srw/schema/5/picaXML-v1.0}record', 'record')
         convert_record = convert_pica_record
     writing_parquet = output.endswith('.parquet')
-    with cast(OpenFile, fsspec.open(output, 'wt' if not writing_parquet else 'wb', compression="infer")) as of, pq.ParquetWriter(of, 
-            schema=schema, 
-            compression=parquet_compression, 
-            compression_level=parquet_compression_level,
-#            use_byte_stream_split=['record_number', 'field_number', 'subfield_number'], # type: ignore pyarrow import complains: BYTE_STREAM_SPLIT encoding is only supported for FLOAT or DOUBLE data
-            write_page_index=True, 
-            use_dictionary=['field_code', 'subfield_code'], # type: ignore
-            store_decimal_as_integer=True,
-            sorting_columns=[pq.SortingColumn(0), pq.SortingColumn(1), pq.SortingColumn(2)],
-        ) if writing_parquet else nullcontext(csv.writer(of, delimiter='\t' if '.tsv' in output else ',')) as ow:
-        if writing_parquet:
-            batch = []
-        else:
-            cast(_csv.Writer, ow).writerow(['record_number', 'field_number', 'subfield_number', 'field_code', 'subfield_code', 'value'])            
-        n = 1
-        input_files = fsspec.open_files(input, 'rb')
-        tsize = reduce(lambda tsize, inf: tsize + inf.fs.size(inf.path), input_files, 0)
-        pbar = tqdm(total=tsize, unit='b', smoothing=0, unit_scale=True, unit_divisor=1024, dynamic_ncols=True)
-        processed_files_tsize = 0
-        for input_file in input_files:
-            pbar.set_description(f"Processing {input_file.path}")
-            with input_file as oinf:
-                    compression = infer_compression(input_file.path)
-                    if compression is not None:
-                        inf = compr[compression](oinf, mode='rb') # type: ignore
-                    else:
-                        inf = oinf
-                    context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
-                    for _, elem in context:
-                        for row in convert_record(elem):
-                            if writing_parquet:
-                                batch.append((n, *row))
-                                if len(batch) == parquet_batch_size:
-                                    cast(pq.ParquetWriter, ow).write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
-                                    batch = []
-                            else:
-                                cast(_csv.Writer, ow).writerow((n, *row))
-                        n += 1
-                        elem.clear()
-                        while elem.getprevious() is not None:
-                            del elem.getparent()[0]
-                        pbar.n = processed_files_tsize + oinf.tell()
-                        pbar.update(0)
-                    del context
-            processed_files_tsize += input_file.fs.size(input_file.path)
-        if writing_parquet and batch:
-            cast(pq.ParquetWriter, ow).write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
+    if writing_parquet:
+        if parquet_batch_size > max_rows:
+            print(f"Parquet batch size {parquet_batch_size:,} is greater than max rows {max_rows:,}, changing it to {max_rows:,}.")
+            parquet_batch_size = max_rows
+        pw = parquet_writer(output, parquet_compression, parquet_compression_level)
+        pq_rows_written = 0
+        pq_file_number = 1
+        batch = []
+    else:
+        of = fsspec.open(output, 'wt' if not writing_parquet else 'wb', compression="infer").__enter__()
+        cw = csv.writer(of, delimiter='\t' if '.tsv' in output else ',')
+        cw.writerow(['record_number', 'field_number', 'subfield_number', 'field_code', 'subfield_code', 'value'])
+    n = 1
+    input_files = fsspec.open_files(input, 'rb')
+    tsize = reduce(lambda tsize, inf: tsize + inf.fs.size(inf.path), input_files, 0)
+    pbar = tqdm(total=tsize, unit='b', smoothing=0, unit_scale=True, unit_divisor=1024, dynamic_ncols=True)
+    processed_files_tsize = 0
+    for input_file in input_files:
+        pbar.set_description(f"Processing {input_file.path}")
+        with input_file as oinf:
+                compression = infer_compression(input_file.path)
+                if compression is not None:
+                    inf = compr[compression](oinf, mode='rb') # type: ignore
+                else:
+                    inf = oinf
+                context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
+                for _, elem in context:
+                    for row in convert_record(elem):
+                        if writing_parquet:
+                            batch.append((n, *row))
+                            if len(batch) == parquet_batch_size:
+                                pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
+                                batch = []
+                                pq_rows_written += parquet_batch_size
+                        else:
+                            cw.writerow((n, *row))
+                    n += 1
+                    elem.clear()
+                    while elem.getprevious() is not None:
+                        del elem.getparent()[0]
+                    if writing_parquet and pq_rows_written >= max_rows:
+                        pw.close()
+                        pq_rows_written = 0
+                        pq_file_number += 1
+                        pw = parquet_writer(output.replace(".parquet",f"_{pq_file_number}.parquet"), parquet_compression, parquet_compression_level)
+                    pbar.n = processed_files_tsize + oinf.tell()
+                    pbar.update(0)
+                del context
+        processed_files_tsize += input_file.fs.size(input_file.path)
+    if writing_parquet and batch:
+        pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
+        pw.close()
+    else:
+        of.close()
 
 if __name__ == '__main__':
     convert()
