@@ -50,7 +50,7 @@ def convert_marc_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[i
                 yield field_number, sf, tag, 'Z', normalize('NFC', field.attrib['ind2'])
                 sf += 1
 #            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
-           for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
+            for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=sf): # type: ignore
                  yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
         else:
             print(f'Unknown field {field.tag} in record.')
