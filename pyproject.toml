@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "bibxml2"
-version = "1.5.0"
+version = "1.5.1"
 description = "A simple converter of MARCXML/PICAXML to CSV/TSV/parquet"
 authors = ["Eetu Mäkelä <eetu.makela@helsinki.fi>"]
 readme = "README.md"
