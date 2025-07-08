@@ -1,37 +1,44 @@
-[tool.poetry]
-name = "bibxml2"
-version = "1.5.1"
-description = "A simple converter of MARCXML/PICAXML to CSV/TSV/parquet"
-authors = ["Eetu Mäkelä <eetu.makela@helsinki.fi>"]
-readme = "README.md"
+[project]
+authors = [
+    {name = "Eetu Mäkelä", email = "eetu.makela@helsinki.fi"},
+]
 license = "MIT"
-repository = "https://github.com/hsci-r/bibxml2"
+requires-python = ">=3.9"
+dependencies = [
+    "lxml>=5.0.0",
+    "click>=8.0.0",
+    "tqdm>=4.5.0",
+    "hsciutil>=0.1.2",
+    "fsspec>=2025.2.0",
+    "pyarrow>=20.0.0",
+    "s3fs>=2025.2.0",
+    "zstandard>=0.23.0",
+    "pymarc>=5.3.1",
+]
+name = "bib2"
+version = "1.5.5"
+description = "A simple converter of MARC/MARCXML/PICAXML to CSV/TSV/parquet"
+readme = "README.md"
 keywords = [
+    "MARC",
     "MARCXML",
     "PICA XML",
     "bibliographic data",
-    "data conversion"
+    "data conversion",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<4.0"
-lxml = ">=5.4.0"
-click = ">=8.2.1"
-tqdm = ">=4.67.1"
-hsciutil = ">=0.1.2"
-fsspec = "^2025.5.1"
-pyarrow = "^20.0.0"
-s3fs = "^2025.5.1"
-zstandard = "^0.23.0"
+[project.urls]
+repository = "https://github.com/hsci-r/bibxml2"
 
-[tool.poetry.dev-dependencies]
-autopep8 = "^1.7.0"
-pre-commit = "^2.21.0"
-pylint = "^2.17.7"
+[project.scripts]
+bib2 = "bib2:convert"
+marc2marcxml = "marc2marcxml:convert"
 
-[tool.poetry.scripts]
-bibxml2 = "bibxml2.bibxml2:convert"
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"

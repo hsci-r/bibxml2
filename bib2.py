@@ -1,17 +1,18 @@
-from contextlib import nullcontext
+from io import BytesIO
 from unicodedata import normalize
 import pyarrow as pa
 import pyarrow.parquet as pq
 import csv
 from functools import reduce
-from typing import Iterator, Literal, cast
+from typing import Iterable, Iterator, Literal, TextIO, cast
 
 import click as click
 import lxml.etree
 import fsspec
 from fsspec.core import OpenFile, compr, infer_compression
-import _csv
-from tqdm.auto import tqdm
+import pymarc
+from pymarc import exceptions as exc
+from tqdm import tqdm
 
 schema: pa.Schema = pa.schema([ # R compatibility schema
             pa.field('record_number', pa.int32()),
@@ -34,7 +35,23 @@ def parquet_writer(output: str, parquet_compression: str, parquet_compression_le
             sorting_columns=[pq.SortingColumn(0), pq.SortingColumn(1), pq.SortingColumn(2)],
         ) 
 
-def convert_marc_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, int, str, str, str]]:
+def convert_marc_record(record: pymarc.record.Record) -> Iterator[tuple[int, int, str, str, str]]:
+    yield 1, 1, 'LDR', '', str(record.leader)
+    for field_number, field in enumerate(record, start=2):
+        if field.control_field:
+            yield field_number, 1, field.tag, '', field.value()
+        else:
+            sf = 1
+            if field.indicator1 != ' ':
+                yield field_number, sf, field.tag, 'Y', normalize('NFC', field.indicator1)
+                sf += 1
+            if field.indicator2 != ' ':
+                yield field_number, sf, field.tag, 'Z', normalize('NFC', field.indicator2)
+                sf += 1
+            for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.value is not None, field.subfields), start=sf):
+                yield field_number, subfield_number, field.tag, subfield.code, normalize('NFC', subfield.value)
+
+def convert_marcxml_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, int, str, str, str]]:
     for field_number, field in enumerate(record, start = 1):
         if field.tag.endswith('leader'):
             yield field_number, 1, 'LDR', '', field.text
@@ -55,11 +72,46 @@ def convert_marc_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[i
         else:
             print(f'Unknown field {field.tag} in record.')
 
-def convert_pica_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, int, str, str, str]]:
+def convert_picaxml_record(record: Iterable[lxml.etree._Element]) -> Iterator[tuple[int, int, str, str, str]]:
     for field_number, field in enumerate(record, start=1):
         tag = field.attrib['tag']
         for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=1): # type: ignore
             yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
+
+def yield_from_marc_file(inf: BytesIO) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
+    reader = pymarc.MARCReader(inf, to_unicode=True)
+    for record in reader:
+        if record:
+            yield convert_marc_record(record)
+        elif isinstance(reader.current_exception, exc.FatalReaderError):
+            # data file format error
+            # reader will raise StopIteration
+            print(reader.current_exception)
+            print(reader.current_chunk)
+        else:
+            # fix the record data, skip or stop reading:
+            print(reader.current_exception)
+            print(reader.current_chunk)
+            # break/continue/raise
+
+
+def yield_from_marcxml_file(inf: OpenFile) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
+    tags = ('{http://www.loc.gov/MARC21/slim}record', 'record', '{info:lc/xmlns/marcxchange-v1}record')
+    context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
+    for _, elem in context:
+        yield convert_marcxml_record(elem)
+        elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]
+
+def yield_from_picaxml_file(inf: OpenFile) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
+    tags = ('{info:srw/schema/5/picaXML-v1.0}record', 'record')
+    context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
+    for _, elem in context:
+        yield convert_picaxml_record(elem)
+        elem.clear()
+        while elem.getprevious() is not None:
+            del elem.getparent()[0]            
 
 @click.command
 @click.option("-f", "--format", help="Input format (marc or pica)", type=click.Choice(['marc', 'pica'], case_sensitive=False), default='marc')
@@ -70,12 +122,6 @@ def convert_pica_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[i
 @click.option("-mr", "--max-rows", help="Maximum number of rows per parquet file", type=int, default=1_000_000_000)
 @click.argument('input', nargs=-1)
 def convert(input: list[str], format: Literal['marc','pica'], output: str, parquet_compression: str, parquet_compression_level: int, parquet_batch_size: int, max_rows: int) -> None:
-    if format == 'marc':
-        tags = ('{http://www.loc.gov/MARC21/slim}record', 'record', '{info:lc/xmlns/marcxchange-v1}record')
-        convert_record = convert_marc_record
-    else:
-        tags = ('{info:srw/schema/5/picaXML-v1.0}record', 'record')
-        convert_record = convert_pica_record
     writing_parquet = output.endswith('.parquet')
     if writing_parquet:
         if parquet_batch_size > max_rows:
@@ -86,10 +132,10 @@ def convert(input: list[str], format: Literal['marc','pica'], output: str, parqu
         pq_file_number = 1
         batch = []
     else:
-        of = fsspec.open(output, 'wt' if not writing_parquet else 'wb', compression="infer").__enter__()
+        of = cast(TextIO, fsspec.open(output, 'wt' if not writing_parquet else 'wb', compression="infer").__enter__())
         cw = csv.writer(of, delimiter='\t' if '.tsv' in output else ',')
         cw.writerow(['record_number', 'field_number', 'subfield_number', 'field_code', 'subfield_code', 'value'])
-    n = 1
+    record_number = 1
     input_files = fsspec.open_files(input, 'rb')
     tsize = reduce(lambda tsize, inf: tsize + inf.fs.size(inf.path), input_files, 0)
     pbar = tqdm(total=tsize, unit='b', smoothing=0, unit_scale=True, unit_divisor=1024, dynamic_ncols=True)
@@ -102,21 +148,23 @@ def convert(input: list[str], format: Literal['marc','pica'], output: str, parqu
                     inf = compr[compression](oinf, mode='rb') # type: ignore
                 else:
                     inf = oinf
-                context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
-                for _, elem in context:
-                    for row in convert_record(elem):
+                if format == 'pica':
+                    yield_records = yield_from_picaxml_file(inf)
+                elif not '.xml' in input_file.path and not '.mrcx' in input_file.path:
+                    yield_records = yield_from_marc_file(inf)
+                else:
+                    yield_records = yield_from_marcxml_file(inf)
+                for record in yield_records:
+                    for row in record:
                         if writing_parquet:
-                            batch.append((n, *row))
+                            batch.append((record_number, *row))
                             if len(batch) == parquet_batch_size:
                                 pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
                                 batch = []
                                 pq_rows_written += parquet_batch_size
                         else:
-                            cw.writerow((n, *row))
-                    n += 1
-                    elem.clear()
-                    while elem.getprevious() is not None:
-                        del elem.getparent()[0]
+                            cw.writerow((record_number, *row))
+                    record_number += 1
                     if writing_parquet and pq_rows_written >= max_rows:
                         pw.close()
                         pq_rows_written = 0
@@ -124,7 +172,6 @@ def convert(input: list[str], format: Literal['marc','pica'], output: str, parqu
                         pw = parquet_writer(output.replace(".parquet",f"_{pq_file_number}.parquet"), parquet_compression, parquet_compression_level)
                     pbar.n = processed_files_tsize + oinf.tell()
                     pbar.update(0)
-                del context
         processed_files_tsize += input_file.fs.size(input_file.path)
     if writing_parquet and batch:
         pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
