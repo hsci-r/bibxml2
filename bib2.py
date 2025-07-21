@@ -70,7 +70,6 @@ def convert_marcxml_record(record: lxml.etree._ElementIterator) -> Iterator[Iter
 #            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
             for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=sf): # type: ignore
                 if len(subfield) > 0: # Found an embedded MARC record
-                    print(lxml.etree.tostring(subfield))
                     fields.append((field_number, subfield_number, tag, 'X', subfield.attrib['id']))
                     yield from convert_marcxml_record(subfield)
                 else:
