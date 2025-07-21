@@ -16,7 +16,7 @@ dependencies = [
     "pymarc>=5.3.1",
 ]
 name = "bib2"
-version = "1.5.6"
+version = "1.5.7"
 description = "A simple converter of MARC/MARCXML/PICAXML to CSV/TSV/parquet"
 readme = "README.md"
 keywords = [

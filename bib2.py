@@ -51,26 +51,33 @@ def convert_marc_record(record: pymarc.record.Record) -> Iterator[tuple[int, int
             for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.value is not None, field.subfields), start=sf):
                 yield field_number, subfield_number, field.tag, subfield.code, normalize('NFC', subfield.value)
 
-def convert_marcxml_record(record: lxml.etree._ElementIterator) -> Iterator[tuple[int, int, str, str, str]]:
+def convert_marcxml_record(record: lxml.etree._ElementIterator) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
+    fields = []
     for field_number, field in enumerate(record, start = 1):
         if field.tag.endswith('leader'):
-            yield field_number, 1, 'LDR', '', field.text
+            fields.append((field_number, 1, 'LDR', '', field.text))
         elif field.tag.endswith('controlfield'):
-            yield field_number, 1, field.attrib['tag'], '', field.text
+            fields.append((field_number, 1, field.attrib['tag'], '', field.text))
         elif field.tag.endswith('datafield'):
             tag = field.attrib['tag']
             sf = 1
             if field.attrib['ind1'] != ' ':
-                yield field_number, sf, tag, 'Y', normalize('NFC', field.attrib['ind1'])
+                fields.append((field_number, sf, tag, 'Y', normalize('NFC', field.attrib['ind1'])))
                 sf += 1
             if field.attrib['ind2'] != ' ':
-                yield field_number, sf, tag, 'Z', normalize('NFC', field.attrib['ind2'])
+                fields.append((field_number, sf, tag, 'Z', normalize('NFC', field.attrib['ind2'])))
                 sf += 1
 #            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
             for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=sf): # type: ignore
-                 yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
+                if len(subfield) > 0: # Found an embedded MARC record
+                    print(lxml.etree.tostring(subfield))
+                    fields.append((field_number, subfield_number, tag, 'X', subfield.attrib['id']))
+                    yield from convert_marcxml_record(subfield)
+                else:
+                    fields.append((field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)))
         else:
             print(f'Unknown field {field.tag} in record.')
+    yield iter(fields)
 
 def convert_picaxml_record(record: Iterable[lxml.etree._Element]) -> Iterator[tuple[int, int, str, str, str]]:
     for field_number, field in enumerate(record, start=1):
@@ -83,23 +90,17 @@ def yield_from_marc_file(inf: BytesIO) -> Iterator[Iterator[tuple[int, int, str,
     for record in reader:
         if record:
             yield convert_marc_record(record)
-        elif isinstance(reader.current_exception, exc.FatalReaderError):
-            # data file format error
-            # reader will raise StopIteration
-            print(reader.current_exception)
-            print(reader.current_chunk)
         else:
-            # fix the record data, skip or stop reading:
+            # data file format error
+            # reader will raise StopIteration if it is fatal
             print(reader.current_exception)
             print(reader.current_chunk)
-            # break/continue/raise
-
 
 def yield_from_marcxml_file(inf: OpenFile) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
-    tags = ('{http://www.loc.gov/MARC21/slim}record', 'record', '{info:lc/xmlns/marcxchange-v1}record')
+    tags = ('{http://www.loc.gov/MARC21/slim}record', 'record', '{info:lc/xmlns/marcxchange-v1}record', '{info:lc/xmlns/marcxchange-v2}record')
     context = lxml.etree.iterparse(inf, events=('end',), tag=tags)
     for _, elem in context:
-        yield convert_marcxml_record(elem)
+        yield from convert_marcxml_record(elem)
         elem.clear()
         while elem.getprevious() is not None:
             del elem.getparent()[0]
@@ -173,8 +174,9 @@ def convert(input: list[str], format: Literal['marc','pica'], output: str, parqu
                     pbar.n = processed_files_tsize + oinf.tell()
                     pbar.update(0)
         processed_files_tsize += input_file.fs.size(input_file.path)
-    if writing_parquet and batch:
-        pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
+    if writing_parquet:
+        if batch:
+            pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
         pw.close()
     else:
         of.close()
