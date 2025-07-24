@@ -1,38 +1,44 @@
 from io import BytesIO
+import os
+import shutil
 from unicodedata import normalize
+import duckdb
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
+import pyarrow.compute as pc
 import csv
 from functools import reduce
-from typing import Iterable, Iterator, Literal, TextIO, cast
+from typing import Iterable, Iterator, Literal, Optional, TextIO, cast
 
 import click as click
 import lxml.etree
 import fsspec
 from fsspec.core import OpenFile, compr, infer_compression
 import pymarc
-from pymarc import exceptions as exc
 from tqdm import tqdm
 
 schema: pa.Schema = pa.schema([ # R compatibility schema
             pa.field('record_number', pa.int32()),
             pa.field('field_number', pa.int32()),
             pa.field('subfield_number', pa.int32()),
-            pa.field('field_code', pa.dictionary(pa.int32(), pa.string())),
-            pa.field('subfield_code', pa.dictionary(pa.int32(), pa.string())),
+            pa.field('field_code', pa.string()),
+            pa.field('subfield_code', pa.string()),
+            #pa.field('field_code', pa.dictionary(pa.int32(), pa.string())),
+            #pa.field('subfield_code', pa.dictionary(pa.int32(), pa.string())),
             pa.field('value', pa.string()) 
 ])
 
-def parquet_writer(output: str, parquet_compression: str, parquet_compression_level: int) -> pq.ParquetWriter:
+def parquet_writer(output: str, parquet_compression: str, parquet_compression_level: Optional[int], sort_by_field_code: bool) -> pq.ParquetWriter:
     return pq.ParquetWriter(output, 
             schema=schema, 
             compression=parquet_compression, 
             compression_level=parquet_compression_level,
 #            use_byte_stream_split=['record_number', 'field_number', 'subfield_number'], # type: ignore pyarrow import complains: BYTE_STREAM_SPLIT encoding is only supported for FLOAT or DOUBLE data
-            write_page_index=True, 
-            use_dictionary=['field_code', 'subfield_code'], # type: ignore
-            store_decimal_as_integer=True,
-            sorting_columns=[pq.SortingColumn(0), pq.SortingColumn(1), pq.SortingColumn(2)],
+#            write_page_index=True, 
+#            use_dictionary=['field_code', 'subfield_code'], # type: ignore
+#            store_decimal_as_integer=True,
+#            sorting_columns=[pq.SortingColumn(0), pq.SortingColumn(1), pq.SortingColumn(2)] if not sort_by_field_code else [pq.SortingColumn(3), pq.SortingColumn(0), pq.SortingColumn(1), pq.SortingColumn(2)],
         ) 
 
 def convert_marc_record(record: pymarc.record.Record) -> Iterator[tuple[int, int, str, str, str]]:
@@ -111,30 +117,9 @@ def yield_from_picaxml_file(inf: OpenFile) -> Iterator[Iterator[tuple[int, int, 
         yield convert_picaxml_record(elem)
         elem.clear()
         while elem.getprevious() is not None:
-            del elem.getparent()[0]            
+            del elem.getparent()[0]
 
-@click.command
-@click.option("-f", "--format", help="Input format (marc or pica)", type=click.Choice(['marc', 'pica'], case_sensitive=False), default='marc')
-@click.option("-o", "--output", help="Output CSV/TSV (gz) / parquet file", required=True)
-@click.option("-c", "--parquet-compression", help="Parquet compression codec", default='zstd')
-@click.option("-l", "--parquet-compression-level", help="Parquet compression level", type=int, default=22)
-@click.option("-b", "--parquet-batch-size", help="Parquet batch size in bytes", type=int, default=1024*1024*64)
-@click.option("-mr", "--max-rows", help="Maximum number of rows per parquet file", type=int, default=1_000_000_000)
-@click.argument('input', nargs=-1)
-def convert(input: list[str], format: Literal['marc','pica'], output: str, parquet_compression: str, parquet_compression_level: int, parquet_batch_size: int, max_rows: int) -> None:
-    writing_parquet = output.endswith('.parquet')
-    if writing_parquet:
-        if parquet_batch_size > max_rows:
-            print(f"Parquet batch size {parquet_batch_size:,} is greater than max rows {max_rows:,}, changing it to {max_rows:,}.")
-            parquet_batch_size = max_rows
-        pw = parquet_writer(output, parquet_compression, parquet_compression_level)
-        pq_rows_written = 0
-        pq_file_number = 1
-        batch = []
-    else:
-        of = cast(TextIO, fsspec.open(output, 'wt' if not writing_parquet else 'wb', compression="infer").__enter__())
-        cw = csv.writer(of, delimiter='\t' if '.tsv' in output else ',')
-        cw.writerow(['record_number', 'field_number', 'subfield_number', 'field_code', 'subfield_code', 'value'])
+def yield_rows(input: list[str], format: Literal['marc','pica']) -> Iterator[tuple[int, int, int, str, str, str]]:
     record_number = 1
     input_files = fsspec.open_files(input, 'rb')
     tsize = reduce(lambda tsize, inf: tsize + inf.fs.size(inf.path), input_files, 0)
@@ -156,29 +141,101 @@ def convert(input: list[str], format: Literal['marc','pica'], output: str, parqu
                     yield_records = yield_from_marcxml_file(inf)
                 for record in yield_records:
                     for row in record:
-                        if writing_parquet:
-                            batch.append((record_number, *row))
-                            if len(batch) == parquet_batch_size:
-                                pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
-                                batch = []
-                                pq_rows_written += parquet_batch_size
-                        else:
-                            cw.writerow((record_number, *row))
+                        yield record_number, *row
                     record_number += 1
-                    if writing_parquet and pq_rows_written >= max_rows:
-                        pw.close()
-                        pq_rows_written = 0
-                        pq_file_number += 1
-                        pw = parquet_writer(output.replace(".parquet",f"_{pq_file_number}.parquet"), parquet_compression, parquet_compression_level)
                     pbar.n = processed_files_tsize + oinf.tell()
                     pbar.update(0)
         processed_files_tsize += input_file.fs.size(input_file.path)
-    if writing_parquet:
-        if batch:
-            pw.write_batch(pa.record_batch(list(zip(*batch)), schema=schema), row_group_size=parquet_batch_size)
+
+def yield_batches(input: list[str], format: Literal['marc','pica'], parquet_batch_size: int, schema: pa.Schema) -> Iterator[pa.RecordBatch]:
+    batch = []
+    for row in yield_rows(input, format):
+        batch.append(row)
+        if len(batch) == parquet_batch_size:
+            yield pa.record_batch(list(zip(*batch)), schema=schema)
+            batch = []
+    if batch:
+        yield pa.record_batch(list(zip(*batch)), schema=schema)
+
+@click.command
+@click.option("-f", "--format", help="Input format (marc or pica)", type=click.Choice(['marc', 'pica'], case_sensitive=False), default='marc')
+@click.option("-o", "--output", help="Output CSV/TSV (gz) / parquet file", required=True)
+@click.option("-pc", "--parquet-compression", help="Parquet compression codec", default='zstd')
+@click.option("-pcl", "--parquet-compression-level", help="Parquet compression level", type=int, default=22)
+@click.option("-prgs", "--parquet-row-group-size", help="Parquet row group size in bytes", type=int, default=1024*1024)
+@click.option("-pmrpf", "--parquet-max-rows-per-file", help="Maximum number of rows per parquet file", type=int, default=1_000_000_000)
+@click.option("-ps", "--parquet-sort", flag_value=True, default=False, help="Sort parquet output by field_code")
+@click.option("-pd", "--parquet-use-duckdb", flag_value=True, default=False, help="Write final parquet files using DuckDB for better parquet statistics")
+@click.argument('input', nargs=-1)
+def convert(input: list[str], format: Literal['marc','pica'], output: str, parquet_compression: str, parquet_compression_level: int, parquet_row_group_size: int, parquet_max_rows_per_file: int, parquet_sort: bool, parquet_use_duckdb: bool) -> None:
+    if output.endswith('.parquet'):
+        if parquet_row_group_size > parquet_max_rows_per_file:
+            print(f"Parquet row group size {parquet_row_group_size:,} is greater than max rows {parquet_max_rows_per_file:,}, changing it to {parquet_max_rows_per_file:,}.")
+            parquet_row_group_size = parquet_max_rows_per_file
+        cur_output = output
+        pq_rows_written = 0
+        pq_file_number = 1
+        if not parquet_sort:
+            pw = parquet_writer(cur_output, parquet_compression, parquet_compression_level if not duckdb else None, False)
+            for batch in yield_batches(input, format, parquet_row_group_size, schema):
+                pw.write_batch(batch)
+                pq_rows_written += batch.num_rows
+                if pq_rows_written >= parquet_max_rows_per_file:
+                    pw.close()
+                    pq_rows_written = 0
+                    pq_file_number += 1
+                    if parquet_use_duckdb:
+                        duckdb.query(f"COPY '{cur_output}' TO '{cur_output}.duckdbtmp' (FORMAT 'parquet', COMPRESSION '{parquet_compression}', COMPRESSION_LEVEL {parquet_compression_level})")
+                        os.remove(cur_output)
+                        os.rename(cur_output + ".duckdbtmp", cur_output)
+                    cur_output = output.replace(".parquet",f"_{pq_file_number}.parquet")
+                    pw = parquet_writer(cur_output, parquet_compression, parquet_compression_level if not duckdb else None, False)
+            pw.close()
+        else:
+            with parquet_writer(output+".tmp", parquet_compression, None, False) as pw:
+                for batch in yield_batches(input, format, parquet_row_group_size, schema):
+                    pw.write_batch(batch)
+            pr = ds.dataset(output+".tmp")
+            field_codes = set()
+            for batch in pr.to_batches(columns=['field_code']):
+                field_codes.update(batch.column('field_code').unique().to_pylist())
+            pw = parquet_writer(cur_output, parquet_compression, parquet_compression_level if not duckdb else None, False)
+            batches = []
+            batch_size = 0
+            for field_code in tqdm(sorted(field_codes)):
+                for batch in pr.scanner(filter=pc.field('field_code') == field_code).to_batches():
+                    if batch.num_rows > 0:
+                        batches.append(batch)
+                        batch_size += batch.num_rows
+                        if batch_size >= parquet_row_group_size:
+                            pw.write_batch(pa.concat_batches(batches), row_group_size=parquet_row_group_size)
+                            pq_rows_written += batch_size
+                            if pq_rows_written >= parquet_max_rows_per_file:
+                                pw.close()
+                                pq_rows_written = 0
+                                pq_file_number += 1
+                                if parquet_use_duckdb:
+                                    duckdb.query(f"COPY '{cur_output}' TO '{cur_output}.duckdbtmp' (FORMAT 'parquet', COMPRESSION '{parquet_compression}', COMPRESSION_LEVEL {parquet_compression_level})")
+                                    os.remove(cur_output)
+                                    os.rename(cur_output + ".duckdbtmp", cur_output)
+                                cur_output = output.replace(".parquet",f"_{pq_file_number}.parquet")
+                                pw = parquet_writer(cur_output, parquet_compression, parquet_compression_level if not duckdb else None, False)
+                            batches = []
+                            batch_size = 0
+            if batches:
+                pw.write_batch(pa.concat_batches(batches), row_group_size=parquet_row_group_size)
+            os.remove(output+".tmp")
         pw.close()
+        if parquet_use_duckdb:
+            duckdb.query(f"COPY '{cur_output}' TO '{cur_output}.duckdbtmp' (FORMAT 'parquet', COMPRESSION '{parquet_compression}', COMPRESSION_LEVEL {parquet_compression_level})")
+            os.remove(cur_output)
+            os.rename(cur_output + ".duckdbtmp", cur_output)            
     else:
-        of.close()
+        with fsspec.open(output, 'wt', compression="infer") as of:
+            cw = csv.writer(cast(TextIO, of), delimiter='\t' if '.tsv' in output else ',')
+            cw.writerow(['record_number', 'field_number', 'subfield_number', 'field_code', 'subfield_code', 'value'])
+            for row in yield_rows(input, format):
+                cw.writerow(row)
 
 if __name__ == '__main__':
     convert()
