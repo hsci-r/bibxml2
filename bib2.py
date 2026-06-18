@@ -20,6 +20,8 @@ from fsspec.core import OpenFile, compr, infer_compression
 import pymarc
 from tqdm import tqdm
 
+import logging
+
 schema: pa.Schema = pa.schema([ # R compatibility schema
             pa.field('record_number', pa.int32()),
             pa.field('field_number', pa.int32()),
@@ -57,36 +59,49 @@ def convert_marc_record(record: pymarc.record.Record) -> Iterator[tuple[int, int
 def convert_marcxml_record(record: lxml.etree._ElementIterator) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
     fields = []
     for field_number, field in enumerate(record, start = 1):
-        if field.tag.endswith('leader'):
-            fields.append((field_number, 1, 'LDR', '', field.text))
-        elif field.tag.endswith('controlfield'):
-            fields.append((field_number, 1, field.attrib['tag'], '', field.text))
-        elif field.tag.endswith('datafield'):
-            tag = field.attrib['tag']
-            sf = 1
-            if field.attrib['ind1'] != ' ':
-                fields.append((field_number, sf, tag, 'Y', normalize('NFC', field.attrib['ind1'])))
-                sf += 1
-            if field.attrib['ind2'] != ' ':
-                fields.append((field_number, sf, tag, 'Z', normalize('NFC', field.attrib['ind2'])))
-                sf += 1
-#            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
-            for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=sf): # type: ignore
-                if len(subfield) > 0: # Found an embedded MARC record
-                    fields.append((field_number, subfield_number, tag, 'X', subfield.attrib['id']))
-                    yield from convert_marcxml_record(subfield)
-                else:
-                    fields.append((field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)))
-        else:
-            print(f'Unknown field {field.tag} in record.')
+        try:
+
+            if field.tag.endswith('leader'):
+                fields.append((field_number, 1, 'LDR', '', field.text))
+            elif field.tag.endswith('controlfield'):
+                fields.append((field_number, 1, field.attrib['tag'], '', field.text))
+            elif field.tag.endswith('datafield'):
+                tag = field.attrib['tag']
+                sf = 1
+                if field.attrib['ind1'] != ' ':
+                    fields.append((field_number, sf, tag, 'Y', normalize('NFC', field.attrib['ind1'])))
+                    sf += 1
+                if field.attrib['ind2'] != ' ':
+                    fields.append((field_number, sf, tag, 'Z', normalize('NFC', field.attrib['ind2'])))
+                    sf += 1
+    #            for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=sf): # type: ignore
+                for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=sf): # type: ignore
+                    try:
+                        if len(subfield) > 0: # Found an embedded MARC record
+                            fields.append((field_number, subfield_number, tag, 'X', subfield.attrib['id']))
+                            yield from convert_marcxml_record(subfield)
+                        else:
+                            fields.append((field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)))
+                    except Exception as e:
+                        logging.warning(f"Error parsing subfield {lxml.etree.tostring(subfield, encoding='unicode')} of field {lxml.etree.tostring(field, encoding='unicode')}: {e}")
+            else:
+                logging.warning(f'Unknown field {field.tag} in record.')
+        except Exception as e:
+            logging.warning(f"Error parsing field {lxml.etree.tostring(field, encoding='unicode')} of record {lxml.etree.tostring(record, encoding='unicode')}: {e}")
     yield iter(fields)
 
 def convert_picaxml_record(record: Iterable[lxml.etree._Element]) -> Iterator[tuple[int, int, str, str, str]]:
     for field_number, field in enumerate(record, start=1):
-        tag = field.attrib['tag']
-        #for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=1): # type: ignore
-        for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=1): # type: ignore
-            yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
+        try:
+            tag = field.attrib['tag']
+            #for subfield_number, subfield in enumerate(filter(lambda subfield: not (subfield.text is None and print(f"No text in subfield {subfield.attrib['code']} of field {tag} in field {lxml.etree.tostring(field, encoding='unicode')}") is None), field), start=1): # type: ignore
+            for subfield_number, subfield in enumerate(filter(lambda subfield: subfield.text is not None, field), start=1): # type: ignore
+                try:
+                    yield field_number, subfield_number, tag, subfield.attrib['code'], normalize('NFC', subfield.text)
+                except Exception as e:
+                    logging.warning(f"Error parsing subfield {lxml.etree.tostring(subfield, encoding='unicode')} of field {lxml.etree.tostring(field, encoding='unicode')}: {e}")
+        except Exception as e:
+            logging.warning(f"Error converting record {lxml.etree.tostring(record, encoding='unicode')}: {e}")
 
 def yield_from_marc_file(inf: BytesIO) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
     reader = pymarc.MARCReader(inf, to_unicode=True)
@@ -96,8 +111,8 @@ def yield_from_marc_file(inf: BytesIO) -> Iterator[Iterator[tuple[int, int, str,
         else:
             # data file format error
             # reader will raise StopIteration if it is fatal
-            print(reader.current_exception)
-            print(reader.current_chunk)
+            logging.error(reader.current_exception)
+            logging.error(reader.current_chunk)
 
 def yield_from_marcxml_file(inf: OpenFile) -> Iterator[Iterator[tuple[int, int, str, str, str]]]:
     tags = ('{http://www.loc.gov/MARC21/slim}record', 'record', '{info:lc/xmlns/marcxchange-v1}record', '{info:lc/xmlns/marcxchange-v2}record')
@@ -158,7 +173,7 @@ def yield_batches(input: list[str], format: Literal['marc','pica'], parquet_batc
 @click.command
 @click.option("-f", "--format", help="Input format (marc or pica)", type=click.Choice(['marc', 'pica'], case_sensitive=False), default='marc')
 @click.option("-o", "--output", help="Output CSV/TSV (gz) / parquet file", required=True)
-@click.option("-s", "--max-file-size", help="Maximum size of parquet files in bytes (default 4,000,000,000)", type=int, default=4_000_000_000)
+@click.option("-s", "--max-file-size", help="Maximum size of parquet files in bytes (default 2,000,000,000)", type=int, default=2_000_000_000)
 @click.argument('input', nargs=-1)
 def convert(input: list[str], format: Literal['marc','pica'], output: str, max_file_size: int) -> None:
     if output.endswith('.parquet'):
